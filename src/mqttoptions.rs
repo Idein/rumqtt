@@ -70,6 +70,8 @@ pub struct MqttOptions {
     max_packet_size: usize,
     /// last will and testament
     last_will: Option<LastWill>,
+    /// rate limit publishes
+    outgoing_ratelimit: Option<u64>
 }
 
 impl Default for MqttOptions {
@@ -86,6 +88,7 @@ impl Default for MqttOptions {
             security: SecurityOptions::None,
             max_packet_size: 256 * 1024,
             last_will: None,
+            outgoing_ratelimit: None
         }
     }
 }
@@ -110,6 +113,7 @@ impl MqttOptions {
             security: SecurityOptions::None,
             max_packet_size: 256 * 1024,
             last_will: None,
+            outgoing_ratelimit: None
         }
     }
 
@@ -210,6 +214,19 @@ impl MqttOptions {
     pub fn clear_last_will(mut self) -> Self {
         self.last_will = None;
         self
+    }
+
+    pub fn set_outgoing_ratelimit(mut self, rate: u64) -> Self {
+        if rate == 0 {
+            panic!("zero rate is not supported");
+        }
+
+        self.outgoing_ratelimit = Some(rate);
+        self
+    }
+
+    pub fn outgoing_ratelimit(&mut self) -> Option<u64> {
+        self.outgoing_ratelimit
     }
 
     pub fn connect_packet(&self) -> Result<Connect, ConnectError> {

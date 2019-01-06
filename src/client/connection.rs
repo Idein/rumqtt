@@ -19,6 +19,7 @@ use std::{cell::RefCell, rc::Rc, thread, time::Duration};
 use tokio::runtime::current_thread::Runtime;
 use tokio_codec::Framed;
 use tokio_timer::{timeout, Timeout};
+use tokio::prelude::StreamExt as OtherStreamExt;
 
 //  NOTES: Don't use `wait` in eventloop thread even if you
 //         are ok with blocking code. It might cause deadlocks
@@ -82,11 +83,13 @@ impl Connection {
     //       bind to reactor lazily.
     //       You'll face `reactor gone` error if `framed` is used again with a new recator
     fn mqtt_eventloop(&mut self, mut request_rx: Receiver<Request>, mut command_rx: Receiver<Command>) {
-        let reconnect_option = self.mqttoptions.reconnect_opts();
         let mut network_request_stream = self.request_stream(request_rx.by_ref());
         let mut command_stream = self.command_stream(command_rx.by_ref());
 
         'reconnection: loop {
+            let reconnect_option = self.mqttoptions.reconnect_opts();
+            let delay_ms = Duration::from_millis(15);
+
             let mqtt_connect_future = self.mqtt_connect();
             let timeout = Duration::from_secs(30);
             let (runtime, framed) = match self.connect_timeout(mqtt_connect_future, timeout) {
@@ -103,6 +106,11 @@ impl Connection {
 
             // merge previous session's unacked data into current stream
             self.merge_network_request_stream(network_request_stream);
+
+            let network_request_stream = network_request_stream
+                                                .throttle(delay_ms)
+                                                .map_err(|e| handle_stream_throttle_error(e));
+
             let mqtt_future = self.mqtt_future(command_stream,
                                                network_request_stream,
                                                network_reply_stream,
@@ -188,7 +196,7 @@ impl Connection {
         let network_reply_stream = Timeout::new(network_reply_stream, keep_alive)
                                         .or_else(move |e| {
                                             let mut mqtt_state = mqtt_state.borrow_mut();
-                                            handle_stream_error(e, &mut mqtt_state)
+                                            handle_stream_timeout_error(e, &mut mqtt_state)
                                         })
                                         .filter(|reply| should_forward_packet(reply))
                                         .and_then(move |packet| future::ok(packet.into()));
@@ -349,7 +357,15 @@ impl Connection {
     }
 }
 
-fn handle_stream_error(
+fn handle_stream_throttle_error(error: tokio_timer::throttle::ThrottleError<NetworkError>) -> NetworkError {
+    if let Some(error) = error.into_stream_error() {
+        error
+    } else {
+        NetworkError::Throttle
+    }
+}
+
+fn handle_stream_timeout_error(
     error: timeout::Error<NetworkError>,
     mqtt_state: &mut MqttState) 
     -> impl Future<Item = Request, Error = NetworkError> {
