@@ -153,6 +153,13 @@ impl MqttState {
         Ok(publish)
     }
 
+    pub fn publish_queue_len(&self, qos: QoS) -> usize {
+        match qos {
+            QoS::AtMostOnce => 0,
+            QoS::AtLeastOnce | QoS::ExactlyOnce => self.outgoing_pub.len()
+        }
+    }
+
     pub fn handle_incoming_puback(&mut self, pkid: PacketIdentifier) -> Result<(Notification, Request), NetworkError> {
         match self.outgoing_pub.iter().position(|x| x.pkid == Some(pkid)) {
             Some(index) => {

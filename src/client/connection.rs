@@ -14,7 +14,7 @@ use futures::{
     sync::mpsc::{self, Receiver},
     Future, Sink, Stream,
 };
-use mqtt311::Packet;
+use mqtt311::{Packet, QoS};
 use std::{cell::RefCell, rc::Rc, thread, time::Duration};
 use tokio::runtime::current_thread::Runtime;
 use tokio_codec::Framed;
@@ -106,11 +106,10 @@ impl Connection {
 
             // merge previous session's unacked data into current stream
             self.merge_network_request_stream(network_request_stream);
-
             let network_request_stream = network_request_stream
                                                 .throttle(delay_ms)
                                                 .map_err(|e| handle_stream_throttle_error(e));
-
+            let network_request_stream = self.delayed_stream(network_request_stream);
             let mqtt_future = self.mqtt_future(command_stream,
                                                network_request_stream,
                                                network_reply_stream,
@@ -337,13 +336,32 @@ impl Connection {
 
         let mqtt_state = self.mqtt_state.clone();
         let packet_stream = request_stream.and_then(move |packet: Packet| {
-            let o = mqtt_state.borrow_mut().handle_outgoing_mqtt_packet(packet);
+            let mut mqtt_state = mqtt_state.borrow_mut();
+            let o = mqtt_state.handle_outgoing_mqtt_packet(packet);
             future::result(o)
         });
 
         let mqtt_state = self.mqtt_state.clone();
         let last_session_publishes = mqtt_state.borrow_mut().handle_reconnection();
         packet_stream.prepend(last_session_publishes)
+    }
+
+    fn delayed_stream(&self, stream: impl Stream<Item = Request, Error = NetworkError>)-> impl Stream<Item = Request, Error = NetworkError> {
+        let mqtt_state = self.mqtt_state.clone();
+        stream.and_then(move |request| {
+            let mqtt_state = mqtt_state.borrow();
+            // TODO: Do this only for publishes
+            let len = mqtt_state.publish_queue_len(QoS::AtLeastOnce);
+
+            if len > 100 {
+                let delayed_request = tokio_timer::sleep(Duration::new(2, 0))
+                                                    .map_err(|e| e.into())
+                                                    .map(|_| request);
+                Either::A(delayed_request)
+            } else {
+                Either::B(future::ok(request))
+            }
+        })
     }
 
     fn command_stream<'a>(&mut self, commands: &'a mut mpsc::Receiver<Command>) -> impl PacketStream + 'a {
