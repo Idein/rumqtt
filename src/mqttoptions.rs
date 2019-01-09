@@ -70,8 +70,14 @@ pub struct MqttOptions {
     max_packet_size: usize,
     /// last will and testament
     last_will: Option<LastWill>,
-    /// rate limit publishes
-    outgoing_ratelimit: Option<u64>
+    /// rate limit for outgoing messages
+    outgoing_ratelimit: Option<u64>,
+    /// rate limit for incoming messages
+    incoming_ratelimit: Option<u64>,
+    /// rate limit applied after queue size limit
+    outgoing_queuelimit: Option<(usize, u64)>,
+    /// rate limit applied after queue size limit
+    incoming_queuelimit: Option<(usize, u64)>,
 }
 
 impl Default for MqttOptions {
@@ -88,7 +94,10 @@ impl Default for MqttOptions {
             security: SecurityOptions::None,
             max_packet_size: 256 * 1024,
             last_will: None,
-            outgoing_ratelimit: None
+            outgoing_ratelimit: None,
+            incoming_ratelimit: None,
+            outgoing_queuelimit: None,
+            incoming_queuelimit: None,
         }
     }
 }
@@ -113,7 +122,10 @@ impl MqttOptions {
             security: SecurityOptions::None,
             max_packet_size: 256 * 1024,
             last_will: None,
-            outgoing_ratelimit: None
+            outgoing_ratelimit: None,
+            incoming_ratelimit: None,
+            outgoing_queuelimit: None,
+            incoming_queuelimit: None,
         }
     }
 
@@ -218,15 +230,54 @@ impl MqttOptions {
 
     pub fn set_outgoing_ratelimit(mut self, rate: u64) -> Self {
         if rate == 0 {
-            panic!("zero rate is not supported");
+            panic!("zero rate is not allowed");
         }
 
         self.outgoing_ratelimit = Some(rate);
         self
     }
 
-    pub fn outgoing_ratelimit(&mut self) -> Option<u64> {
+    pub fn outgoing_ratelimit(&self) -> Option<u64> {
         self.outgoing_ratelimit
+    }
+
+    pub fn set_incoming_ratelimit(mut self, rate: u64) -> Self {
+        if rate == 0 {
+            panic!("zero rate is not allowed")
+        }
+
+        self.incoming_ratelimit = Some(rate);
+        self
+    }
+
+    pub fn incoming_ratelimit(&self) -> Option<u64> {
+        self.incoming_ratelimit
+    }
+
+    pub fn set_outgoing_queuelimit(mut self, queue_size: usize, rate: u64) -> Self {
+        if rate == 0 || queue_size == 0 {
+            panic!("zero rate/size is not allowed")
+        }
+
+        self.outgoing_queuelimit = Some((queue_size, rate));
+        self
+    }
+
+    pub fn outgoing_queuelimit(&self) -> Option<(usize, u64)> {
+        self.outgoing_queuelimit
+    }
+
+    pub fn set_incoming_queuelimit(mut self, queue_size: usize, rate: u64) -> Self {
+        if rate == 0 || queue_size == 0 {
+            panic!("zero rate/size is not allowed")
+        }
+
+        self.incoming_queuelimit = Some((queue_size, rate));
+        self
+    }
+
+    pub fn incoming_queuelimit(&self) -> Option<(usize, u64)> {
+        self.incoming_queuelimit
     }
 
     pub fn connect_packet(&self) -> Result<Connect, ConnectError> {

@@ -153,11 +153,8 @@ impl MqttState {
         Ok(publish)
     }
 
-    pub fn publish_queue_len(&self, qos: QoS) -> usize {
-        match qos {
-            QoS::AtMostOnce => 0,
-            QoS::AtLeastOnce | QoS::ExactlyOnce => self.outgoing_pub.len()
-        }
+    pub fn publish_queue_len(&self) -> usize {
+        self.outgoing_pub.len()
     }
 
     pub fn handle_incoming_puback(&mut self, pkid: PacketIdentifier) -> Result<(Notification, Request), NetworkError> {

@@ -14,12 +14,11 @@ use futures::{
     sync::mpsc::{self, Receiver},
     Future, Sink, Stream,
 };
-use mqtt311::{Packet, QoS};
+use mqtt311::Packet;
 use std::{cell::RefCell, rc::Rc, thread, time::Duration};
 use tokio::runtime::current_thread::Runtime;
 use tokio_codec::Framed;
 use tokio_timer::{timeout, Timeout};
-use tokio::prelude::StreamExt as OtherStreamExt;
 
 //  NOTES: Don't use `wait` in eventloop thread even if you
 //         are ok with blocking code. It might cause deadlocks
@@ -88,7 +87,6 @@ impl Connection {
 
         'reconnection: loop {
             let reconnect_option = self.mqttoptions.reconnect_opts();
-            let delay_ms = Duration::from_millis(15);
 
             let mqtt_connect_future = self.mqtt_connect();
             let timeout = Duration::from_secs(30);
@@ -106,12 +104,9 @@ impl Connection {
 
             // merge previous session's unacked data into current stream
             self.merge_network_request_stream(network_request_stream);
-            let network_request_stream = network_request_stream
-                                                .throttle(delay_ms)
-                                                .map_err(|e| handle_stream_throttle_error(e));
-            let network_request_stream = self.delayed_stream(network_request_stream);
+            let delayed_request_stream = self.delayed_request_stream(network_request_stream);
             let mqtt_future = self.mqtt_future(command_stream,
-                                               network_request_stream,
+                                               delayed_request_stream,
                                                network_reply_stream,
                                                network_sink);
 
@@ -346,20 +341,55 @@ impl Connection {
         packet_stream.prepend(last_session_publishes)
     }
 
-    fn delayed_stream(&self, stream: impl Stream<Item = Request, Error = NetworkError>)-> impl Stream<Item = Request, Error = NetworkError> {
+    fn delayed_request_stream(&self, stream: impl Stream<Item = Request, Error = NetworkError>)-> impl Stream<Item = Request, Error = NetworkError> {
+        let outgoing_ratedelay = self
+                                    .mqttoptions
+                                    .outgoing_ratelimit()
+                                    .map(|rate| Duration::from_millis(1000/rate));
+        let outgoing_queuedelay = self
+                                    .mqttoptions
+                                    .outgoing_queuelimit()
+                                    .map(|(queue_limit, rate)| (queue_limit, Duration::from_millis(1000/rate)));
+
         let mqtt_state = self.mqtt_state.clone();
         stream.and_then(move |request| {
             let mqtt_state = mqtt_state.borrow();
-            // TODO: Do this only for publishes
-            let len = mqtt_state.publish_queue_len(QoS::AtLeastOnce);
+            let len = mqtt_state.publish_queue_len();
+            // set rate limiting if the option is set
+            if let Some(d1) = outgoing_ratedelay {
+                let delayed_request = match outgoing_queuedelay {
+                    // set queue size based throttling
+                    Some((limit, d2)) if len > limit => {
+                        let out = tokio_timer::sleep(d2)
+                                                .map_err(|e| e.into())
+                                                .map(|_| request);
+                        Either::A(out)
+                    }
+                    // set message rate based throttling
+                    _ => {
+                        let out = tokio_timer::sleep(d1)
+                                                .map_err(|e| e.into())
+                                                .map(|_| request);
 
-            if len > 100 {
-                let delayed_request = tokio_timer::sleep(Duration::new(2, 0))
-                                                    .map_err(|e| e.into())
-                                                    .map(|_| request);
+                        Either::B(out)
+                    }
+                };
+
                 Either::A(delayed_request)
             } else {
-                Either::B(future::ok(request))
+                let out = match outgoing_queuedelay {
+                    // set queue limit based throttling
+                    Some((limit, d2)) if len > limit => {
+                        let out = tokio_timer::sleep(d2)
+                                                .map_err(|e| e.into())
+                                                .map(|_| request);
+                        Either::A(out)
+                    }
+                    // no throttling
+                    _ => Either::B(future::ok(request))
+                };
+
+                Either::B(out)
             }
         })
     }
@@ -372,14 +402,6 @@ impl Connection {
                 Command::Pause => Err(NetworkError::UserDisconnect),
                 Command::Resume => Err(NetworkError::UserReconnect),
             })
-    }
-}
-
-fn handle_stream_throttle_error(error: tokio_timer::throttle::ThrottleError<NetworkError>) -> NetworkError {
-    if let Some(error) = error.into_stream_error() {
-        error
-    } else {
-        NetworkError::Throttle
     }
 }
 
