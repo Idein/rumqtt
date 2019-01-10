@@ -38,7 +38,7 @@ impl Connection {
     /// connection events in a new thread if the initial connection is successful
     pub fn run(mqttoptions: MqttOptions) -> Result<UserHandle, ConnectError> {
         let (notification_tx, notification_rx) = crossbeam_channel::bounded(10);
-        let (request_tx, request_rx) = mpsc::channel::<Request>(10);
+        let (request_tx, request_rx) = mpsc::channel::<Request>(5);
         let (command_tx, command_rx) = mpsc::channel::<Command>(5);
 
         let (connection_tx, connection_rx) = crossbeam_channel::bounded(1);

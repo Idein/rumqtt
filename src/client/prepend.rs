@@ -50,6 +50,7 @@ where
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         if let Some(v) = self.session.pop_front() {
+            debug!("Sending previous session data");
             return Ok(Async::Ready(Some(v)));
         }
 
