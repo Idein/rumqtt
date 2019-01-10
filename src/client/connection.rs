@@ -352,6 +352,7 @@ impl Connection {
                                     .map(|(queue_limit, rate)| (queue_limit, Duration::from_millis(1000/rate)));
 
         let mqtt_state = self.mqtt_state.clone();
+        let d3 = Duration::from_secs(2);
         stream.and_then(move |request| {
             let mqtt_state = mqtt_state.borrow();
             let len = mqtt_state.publish_queue_len();
@@ -367,7 +368,7 @@ impl Connection {
                     }
                     // set message rate based throttling
                     _ => {
-                        let out = tokio_timer::sleep(d1)
+                        let out = tokio_timer::sleep(d3)
                                                 .map_err(|e| e.into())
                                                 .map(|_| request);
 
