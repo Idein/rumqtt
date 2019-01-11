@@ -1,3 +1,5 @@
+use mqtt311::PacketIdentifier;
+use std::collections::VecDeque;
 use crate::client::{
     mqttstate::MqttState,
     network::stream::NetworkStream,
@@ -104,6 +106,8 @@ impl Connection {
 
             // merge previous session's unacked data into current stream
             self.merge_network_request_stream(network_request_stream);
+            print_last_session_state(network_request_stream, &self.mqtt_state.borrow());
+
             let delayed_request_stream = self.delayed_request_stream(network_request_stream);
             let mqtt_future = self.mqtt_future(command_stream,
                                                delayed_request_stream,
@@ -137,7 +141,7 @@ impl Connection {
 
         let framed = match rt.block_on(mqtt_connect_deadline) {
             Ok(framed) => {
-                debug!("Mqtt connection successful!!");
+                info!("Mqtt connection successful!!");
                 self.handle_connection_success();
                 framed
             }
@@ -276,7 +280,7 @@ impl Connection {
             })
             .and_then(|framed| framed.into_future().map_err(|(err, _framed)| ConnectError::Io(err)))
             .and_then(move |(response, framed)| {
-                debug!("Mqtt connect response = {:?}", response);
+                info!("Mqtt connect response = {:?}", response);
                 let mut mqtt_state = mqtt_state.borrow_mut();
                 check_and_validate_connack(response, framed, &mut mqtt_state)
             })
@@ -352,15 +356,17 @@ impl Connection {
                                     .map(|(queue_limit, rate)| (queue_limit, Duration::from_millis(1000/rate)));
 
         let mqtt_state = self.mqtt_state.clone();
-        let d3 = Duration::from_secs(2);
         stream.and_then(move |request| {
             let mqtt_state = mqtt_state.borrow();
             let len = mqtt_state.publish_queue_len();
+            debug!("Outgoing request = {:?}", request_info(&request));
+
             // set rate limiting if the option is set
             if let Some(d1) = outgoing_ratedelay {
                 let delayed_request = match outgoing_queuedelay {
                     // set queue size based throttling
                     Some((limit, d2)) if len > limit => {
+                        debug!("queue len = {}, limit = {}", len, limit);
                         let out = tokio_timer::sleep(d2)
                                                 .map_err(|e| e.into())
                                                 .map(|_| request);
@@ -368,7 +374,7 @@ impl Connection {
                     }
                     // set message rate based throttling
                     _ => {
-                        let out = tokio_timer::sleep(d3)
+                        let out = tokio_timer::sleep(d1)
                                                 .map_err(|e| e.into())
                                                 .map(|_| request);
 
@@ -381,6 +387,7 @@ impl Connection {
                 let out = match outgoing_queuedelay {
                     // set queue limit based throttling
                     Some((limit, d2)) if len > limit => {
+                        debug!("! queue len = {}, limit = {}", len, limit);
                         let out = tokio_timer::sleep(d2)
                                                 .map_err(|e| e.into())
                                                 .map(|_| request);
@@ -404,6 +411,20 @@ impl Connection {
                 Command::Resume => Err(NetworkError::UserReconnect),
             })
     }
+}
+
+fn print_last_session_state(
+    prepend: &mut Prepend<impl RequestStream>,
+    state: &MqttState) {
+        let last_session_data = prepend.session.iter().map(|request| {
+            match request {
+                Request::Publish(publish) => publish.pkid,
+                _ => None
+            }
+        }).collect::<VecDeque<Option<PacketIdentifier>>>();
+
+        println!("{:?}", last_session_data);
+        println!("{:?}", state.publish_queue_len())
 }
 
 fn handle_stream_timeout_error(
@@ -481,6 +502,23 @@ fn packet_info(packet: &Packet) -> String {
     }
 }
 
+fn request_info(packet: &Request) -> String {
+    match packet {
+        Request::Publish(p) => format!(
+            "topic = {}, \
+             qos = {:?}, \
+             pkid = {:?}, \
+             payload size = {:?} bytes",
+            p.topic_name,
+            p.qos,
+            p.pkid,
+            p.payload.len()
+        ),
+
+        _ => format!("{:?}", packet),
+    }
+}
+
 fn should_reconnect_again(reconnect_options: ReconnectOptions) -> bool {
     match reconnect_options {
         ReconnectOptions::AfterFirstSuccess(time) => {
@@ -513,6 +551,7 @@ impl From<Request> for Packet {
         }
     }
 }
+
 
 type MqttFramed = Framed<NetworkStream, MqttCodec>;
 

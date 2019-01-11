@@ -22,7 +22,7 @@ where
     S: Stream,
 {
     stream: S,
-    session: VecDeque<<S as Stream>::Item>,
+    pub session: VecDeque<<S as Stream>::Item>,
 }
 
 pub fn new<S>(stream: S, session: VecDeque<<S as Stream>::Item>) -> Prepend<S>
