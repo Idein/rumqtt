@@ -75,9 +75,9 @@ pub struct MqttOptions {
     /// rate limit for incoming messages
     incoming_ratelimit: Option<u64>,
     /// rate limit applied after queue size limit
-    outgoing_queuelimit: Option<(usize, u64)>,
+    outgoing_queuelimit: (usize, Duration),
     /// rate limit applied after queue size limit
-    incoming_queuelimit: Option<(usize, u64)>,
+    incoming_queuelimit: (usize, Duration),
 }
 
 impl Default for MqttOptions {
@@ -96,8 +96,8 @@ impl Default for MqttOptions {
             last_will: None,
             outgoing_ratelimit: None,
             incoming_ratelimit: None,
-            outgoing_queuelimit: None,
-            incoming_queuelimit: None,
+            outgoing_queuelimit: (100, Duration::from_secs(3)),
+            incoming_queuelimit: (100, Duration::from_secs(3)),
         }
     }
 }
@@ -124,8 +124,8 @@ impl MqttOptions {
             last_will: None,
             outgoing_ratelimit: None,
             incoming_ratelimit: None,
-            outgoing_queuelimit: None,
-            incoming_queuelimit: None,
+            outgoing_queuelimit: (100, Duration::from_secs(3)),
+            incoming_queuelimit: (100, Duration::from_secs(3)),
         }
     }
 
@@ -254,29 +254,29 @@ impl MqttOptions {
         self.incoming_ratelimit
     }
 
-    pub fn set_outgoing_queuelimit(mut self, queue_size: usize, rate: u64) -> Self {
-        if rate == 0 || queue_size == 0 {
-            panic!("zero rate/size is not allowed")
+    pub fn set_outgoing_queuelimit(mut self, queue_size: usize, delay: Duration) -> Self {
+        if queue_size == 0 {
+            panic!("zero queue size is not allowed")
         }
 
-        self.outgoing_queuelimit = Some((queue_size, rate));
+        self.outgoing_queuelimit = (queue_size, delay);
         self
     }
 
-    pub fn outgoing_queuelimit(&self) -> Option<(usize, u64)> {
+    pub fn outgoing_queuelimit(&self) -> (usize, Duration) {
         self.outgoing_queuelimit
     }
 
-    pub fn set_incoming_queuelimit(mut self, queue_size: usize, rate: u64) -> Self {
-        if rate == 0 || queue_size == 0 {
-            panic!("zero rate/size is not allowed")
+    pub fn set_incoming_queuelimit(mut self, queue_size: usize, delay: Duration) -> Self {
+        if queue_size == 0 {
+            panic!("zero size is not allowed")
         }
 
-        self.incoming_queuelimit = Some((queue_size, rate));
+        self.incoming_queuelimit = (queue_size, delay);
         self
     }
 
-    pub fn incoming_queuelimit(&self) -> Option<(usize, u64)> {
+    pub fn incoming_queuelimit(&self) -> (usize, Duration) {
         self.incoming_queuelimit
     }
 

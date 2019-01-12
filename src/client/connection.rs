@@ -84,7 +84,7 @@ impl Connection {
     //       bind to reactor lazily.
     //       You'll face `reactor gone` error if `framed` is used again with a new recator
     fn mqtt_eventloop(&mut self, mut request_rx: Receiver<Request>, mut command_rx: Receiver<Command>) {
-        let mut network_request_stream = self.request_stream(request_rx.by_ref());
+        let mut prepended_request_stream = self.prepend_stream(request_rx.by_ref());
         let mut command_stream = self.command_stream(command_rx.by_ref());
 
         'reconnection: loop {
@@ -101,12 +101,13 @@ impl Connection {
             let (network_sink, network_stream) = framed.split();
             let network_sink = network_sink.sink_map_err(|e| NetworkError::Io(e));
             let network_reply_stream = self.network_reply_stream(network_stream);
-            let network_request_stream = &mut network_request_stream;
+            let prepended_request_stream = &mut prepended_request_stream;
             let command_stream = &mut command_stream;
 
             // merge previous session's unacked data into current stream
-            self.merge_network_request_stream(network_request_stream);
-            print_last_session_state(network_request_stream, &self.mqtt_state.borrow());
+            self.merge_network_request_stream(prepended_request_stream);
+            print_last_session_state(prepended_request_stream, &self.mqtt_state.borrow());
+            let network_request_stream = self.request_stream(prepended_request_stream);
 
             let delayed_request_stream = self.delayed_request_stream(network_request_stream);
             let mqtt_future = self.mqtt_future(command_stream,
@@ -203,7 +204,7 @@ impl Connection {
         // unnecessary requests
         let network_request_stream = network_request_stream
                                         .and_then(move |packet| future::ok(packet.into()));
-        let network_stream = network_request_stream.select(network_reply_stream);
+        let network_stream = network_reply_stream.select(network_request_stream);
 
         if self.is_network_enabled {
             Either::A(command_stream
@@ -320,7 +321,25 @@ impl Connection {
     /// to user request stream to ensure that they are handled first. This cleanly handles last
     /// session stray (even if disconnect happens while sending last session data)because we always
     /// get back this stream from reactor after disconnection.
-    fn request_stream<'a>(&mut self, request: &'a mut mpsc::Receiver<Request>) -> Prepend<impl RequestStream + 'a> {
+    fn prepend_stream<'a>(&mut self, requests: &'a mut mpsc::Receiver<Request>) -> Prepend<impl RequestStream + 'a> {
+        let request_stream = requests
+            .map_err(|e| {
+                error!("User request error = {:?}", e);
+                NetworkError::Blah
+            });
+
+        let mqtt_state = self.mqtt_state.clone();
+        let last_session_publishes = mqtt_state.borrow_mut().handle_reconnection();
+        request_stream.prepend(last_session_publishes)
+    }
+
+    /// Handles all incoming user and session requests and creates a stream of packets to send
+    /// on network
+    /// All the remaining packets in the last session (when cleansession = false) will be prepended
+    /// to user request stream to ensure that they are handled first. This cleanly handles last
+    /// session stray (even if disconnect happens while sending last session data)because we always
+    /// get back this stream from reactor after disconnection.
+    fn request_stream(&mut self, request: impl RequestStream) -> impl RequestStream {
         // process user requests and convert them to network packets
         let mqtt_state = self.mqtt_state.clone();
         let request_stream = request
@@ -334,70 +353,36 @@ impl Connection {
             });
 
         let mqtt_state = self.mqtt_state.clone();
-        let packet_stream = request_stream.and_then(move |packet: Packet| {
+        request_stream.and_then(move |packet: Packet| {
             let mut mqtt_state = mqtt_state.borrow_mut();
             let o = mqtt_state.handle_outgoing_mqtt_packet(packet);
             future::result(o)
-        });
-
-        let mqtt_state = self.mqtt_state.clone();
-        let last_session_publishes = mqtt_state.borrow_mut().handle_reconnection();
-        packet_stream.prepend(last_session_publishes)
+        })
     }
 
-    fn delayed_request_stream(&self, stream: impl Stream<Item = Request, Error = NetworkError>)-> impl Stream<Item = Request, Error = NetworkError> {
+    fn delayed_request_stream<'a>(&self, stream: impl Stream<Item = Request, Error = NetworkError> + 'a)-> impl Stream<Item = Request, Error = NetworkError> + 'a {
         let outgoing_ratedelay = self
                                     .mqttoptions
                                     .outgoing_ratelimit()
                                     .map(|rate| Duration::from_millis(1000/rate));
-        let outgoing_queuedelay = self
+        let (limit, queuedelay) = self
                                     .mqttoptions
-                                    .outgoing_queuelimit()
-                                    .map(|(queue_limit, rate)| (queue_limit, Duration::from_millis(1000/rate)));
+                                    .outgoing_queuelimit();
 
         let mqtt_state = self.mqtt_state.clone();
+
         stream.and_then(move |request| {
+            let request = request;
+            debug!("Outgoing request = {:?}", request_info(&request));
             let mqtt_state = mqtt_state.borrow();
             let len = mqtt_state.publish_queue_len();
             debug!("Outgoing request = {:?}", request_info(&request));
 
             // set rate limiting if the option is set
-            if let Some(d1) = outgoing_ratedelay {
-                let delayed_request = match outgoing_queuedelay {
-                    // set queue size based throttling
-                    Some((limit, d2)) if len > limit => {
-                        debug!("queue len = {}, limit = {}", len, limit);
-                        let out = tokio_timer::sleep(d2)
-                                                .map_err(|e| e.into())
-                                                .map(|_| request);
-                        Either::A(out)
-                    }
-                    // set message rate based throttling
-                    _ => {
-                        let out = tokio_timer::sleep(d1)
-                                                .map_err(|e| e.into())
-                                                .map(|_| request);
-
-                        Either::B(out)
-                    }
-                };
-
-                Either::A(delayed_request)
+            if let Some(ratedelay) = outgoing_ratedelay {
+                Either::A(throttled_request(ratedelay, queuedelay, len, limit, request))
             } else {
-                let out = match outgoing_queuedelay {
-                    // set queue limit based throttling
-                    Some((limit, d2)) if len > limit => {
-                        debug!("! queue len = {}, limit = {}", len, limit);
-                        let out = tokio_timer::sleep(d2)
-                                                .map_err(|e| e.into())
-                                                .map(|_| request);
-                        Either::A(out)
-                    }
-                    // no throttling
-                    _ => Either::B(future::ok(request))
-                };
-
-                Either::B(out)
+                Either::B(nonthrottled_request(queuedelay, len, limit, request))
             }
         })
     }
@@ -412,6 +397,47 @@ impl Connection {
             })
     }
 }
+
+fn throttled_request(
+    throttle_delay: Duration,
+    queuelimit_delay: Duration,
+    current_queue_size: usize,
+    queue_limit: usize,
+    request: Request)
+    -> impl Future<Item = Request, Error = NetworkError> {
+
+    if current_queue_size > queue_limit {
+        debug!("queue len = {}, limit = {}", current_queue_size, queue_limit);
+        let out = tokio_timer::sleep(queuelimit_delay)
+                                .map_err(|e| e.into())
+                                .map(|_| request);
+        Either::A(out)
+    } else {
+        let out = tokio_timer::sleep(throttle_delay)
+                                .map_err(|e| e.into())
+                                .map(|_| request);
+        Either::B(out)
+    }
+}
+
+fn nonthrottled_request(
+    queuelimit_delay: Duration,
+    current_queue_size: usize,
+    queue_limit: usize,
+    request: Request)
+    -> impl Future<Item = Request, Error = NetworkError> {
+
+    if current_queue_size > queue_limit {
+        debug!("queue len = {}, limit = {}", current_queue_size, queue_limit);
+        let out = tokio_timer::sleep(queuelimit_delay)
+                                .map_err(|e| e.into())
+                                .map(|_| request);
+        Either::A(out)
+    } else {
+        Either::B(future::ok(request))
+    }
+}
+
 
 fn print_last_session_state(
     prepend: &mut Prepend<impl RequestStream>,
