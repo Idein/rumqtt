@@ -40,7 +40,7 @@ impl Connection {
     /// connection events in a new thread if the initial connection is successful
     pub fn run(mqttoptions: MqttOptions) -> Result<UserHandle, ConnectError> {
         let (notification_tx, notification_rx) = crossbeam_channel::bounded(10);
-        let (request_tx, request_rx) = mpsc::channel::<Request>(5);
+        let (request_tx, request_rx) = mpsc::channel::<Request>(1);
         let (command_tx, command_rx) = mpsc::channel::<Command>(5);
 
         let (connection_tx, connection_rx) = crossbeam_channel::bounded(1);
@@ -373,7 +373,6 @@ impl Connection {
 
         stream.and_then(move |request| {
             let request = request;
-            debug!("Outgoing request = {:?}", request_info(&request));
             let mqtt_state = mqtt_state.borrow();
             let len = mqtt_state.publish_queue_len();
             debug!("Outgoing request = {:?}", request_info(&request));
