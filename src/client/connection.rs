@@ -1,5 +1,3 @@
-use mqtt311::PacketIdentifier;
-use std::collections::VecDeque;
 use crate::client::{
     mqttstate::MqttState,
     network::stream::NetworkStream,
@@ -106,7 +104,6 @@ impl Connection {
 
             // merge previous session's unacked data into current stream
             self.merge_network_request_stream(prepended_request_stream);
-            print_last_session_state(prepended_request_stream, &self.mqtt_state.borrow());
             let network_request_stream = self.request_stream(prepended_request_stream);
 
             let delayed_request_stream = self.delayed_request_stream(network_request_stream);
@@ -437,21 +434,6 @@ fn nonthrottled_request(
     }
 }
 
-
-fn print_last_session_state(
-    prepend: &mut Prepend<impl RequestStream>,
-    state: &MqttState) {
-        let last_session_data = prepend.session.iter().map(|request| {
-            match request {
-                Request::Publish(publish) => publish.pkid,
-                _ => None
-            }
-        }).collect::<VecDeque<Option<PacketIdentifier>>>();
-
-        println!("{:?}", last_session_data);
-        println!("{:?}", state.publish_queue_len())
-}
-
 fn handle_stream_timeout_error(
     error: timeout::Error<NetworkError>,
     mqtt_state: &mut MqttState) 
@@ -600,3 +582,18 @@ impl<T> RequestFuture for T where T: Future<Item = Request, Error = NetworkError
 
 trait FramedFuture: Future<Item = MqttFramed, Error = ConnectError> {}
 impl<T> FramedFuture for T where T: Future<Item = MqttFramed, Error = ConnectError> {}
+
+
+// fn print_last_session_state(
+//     prepend: &mut Prepend<impl RequestStream>,
+//     state: &MqttState) {
+//         let last_session_data = prepend.session.iter().map(|request| {
+//             match request {
+//                 Request::Publish(publish) => publish.pkid,
+//                 _ => None
+//             }
+//         }).collect::<VecDeque<Option<PacketIdentifier>>>();
+
+//         debug!("{:?}", last_session_data);
+//         debug!("{:?}", state.publish_queue_len())
+// }
